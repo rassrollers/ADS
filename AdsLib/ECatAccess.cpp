@@ -18,6 +18,7 @@ namespace ads
 #define ECADS_IGRP_MASTER_FLBCMDS 0x0000002C
 
 #define SOCCOM_REG_SOCCOM_TYPE 0
+#define SOCCOM_REG_STATION_ADDRESS 0x0010
 #define SOCCOM_REG_AL_STATUS 0x0130
 #define EC_CMD_TYPE_APRD 1
 #define EC_HEAD_IDX_EXTERN_VALUE 0xff
@@ -216,9 +217,10 @@ std::vector<AmsNetId> ECatAccess::GetECatMasterNetIds() const
 	return masters;
 }
 
-std::map<AmsNetId, std::vector<uint16_t> > ECatAccess::GetECatSlaveAlStatus() const
+std::map<AmsNetId, std::vector<ECatSlaveStatus> >
+ECatAccess::GetECatSlaveStatus() const
 {
-	std::map<AmsNetId, std::vector<uint16_t> > states;
+	std::map<AmsNetId, std::vector<ECatSlaveStatus> > states;
 	for (const auto &master : GetECatMasterNetIds()) {
 		const auto slaveCount = CountECatSlaves(master);
 		if (slaveCount == 0) {
@@ -228,10 +230,51 @@ std::map<AmsNetId, std::vector<uint16_t> > ECatAccess::GetECatSlaveAlStatus() co
 		auto &slaveStates = states[master];
 		slaveStates.reserve(slaveCount);
 		for (uint16_t slave = 0; slave < slaveCount; ++slave) {
-			slaveStates.push_back(ReadECatSlaveAlStatus(master, slave));
+			slaveStates.push_back({
+				ReadECatSlaveStationAddress(master, slave),
+				ReadECatSlaveAlStatus(master, slave)
+			});
 		}
 	}
 	return states;
+}
+
+uint16_t ECatAccess::ReadECatSlaveStationAddress(
+	const AmsNetId &ecatMaster, const uint16_t slaveIndex) const
+{
+	uint32_t bytesRead;
+
+	const auto routeStatus = AddLocalRoute(ecatMaster, gateway.c_str());
+	if (routeStatus != 0) {
+		LOG_ERROR("Adding route for ECat master ["
+			  << ecatMaster << "] via gateway [" << gateway
+			  << "] failed with 0x" << std::hex << routeStatus);
+		throw AdsException(routeStatus);
+	}
+
+	ETYPE_EC_USHORT_CMD cmd = {};
+	cmd.head.cmd = EC_CMD_TYPE_APRD;
+	cmd.head.idx = EC_HEAD_IDX_EXTERN_VALUE;
+	cmd.head.adp = static_cast<uint16_t>(0u - slaveIndex);
+	cmd.head.ado = SOCCOM_REG_STATION_ADDRESS;
+	cmd.head.length = sizeof(uint16_t);
+	cmd.head.irq = 0;
+
+	const AmsAddr addr{ ecatMaster, 0xffff };
+	const auto status = AdsSyncReadWriteReqEx2(
+		device.GetLocalPort(), &addr, ECADS_IGRP_MASTER_FLBCMDS, 0,
+		sizeof(cmd), &cmd, sizeof(cmd), &cmd, &bytesRead);
+
+	DelLocalRoute(ecatMaster);
+
+	if (status != ADSERR_NOERR) {
+		LOG_ERROR("Reading station address for slave["
+			  << slaveIndex << "] of master [" << ecatMaster
+			  << "] failed with 0x" << std::hex << status);
+		throw AdsException(status);
+	}
+
+	return cmd.data;
 }
 
 uint16_t ECatAccess::ReadECatSlaveAlStatus(const AmsNetId &ecatMaster,
